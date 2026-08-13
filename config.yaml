@@ -1,0 +1,26 @@
+api:
+  enabled: false
+  port: 5000
+concurrency: 3
+download_dir: ./downloads
+format: mp4
+logging:
+  file: download.log
+  level: INFO
+metadata: true
+post_process:
+  convert: false
+  target_format: mp4
+proxy: null
+retry:
+  backoff_factor: 2
+  max_attempts: 5
+scheduler:
+  cron: 0 0 * * *
+  enabled: false
+subtitles: true
+thumbnail: true
+vpn:
+  command: openvpn
+  config: ''
+  enabled: false
