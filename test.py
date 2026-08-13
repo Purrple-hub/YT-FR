@@ -12,32 +12,27 @@ import tempfile
 import subprocess
 from pathlib import Path
 import importlib.util
+import json
 
-# ---------- 1. Import all modules (with graceful fallback) ----------
 def import_modules():
-    """Attempt to import all required modules from the project."""
     modules = {}
     try:
-        import main as main_mod
-        modules["main"] = main_mod
+        import main
+        modules["main"] = "OK"
     except Exception as e:
-        modules["main"] = f"Import failed: {e}"
-
+        modules["main"] = f"Failed: {e}"
     try:
-        import core as core_mod
-        modules["core"] = core_mod
+        import core
+        modules["core"] = "OK"
     except Exception as e:
-        modules["core"] = f"Import failed: {e}"
-
+        modules["core"] = f"Failed: {e}"
     try:
-        import utils as utils_mod
-        modules["utils"] = utils_mod
+        import utils
+        modules["utils"] = "OK"
     except Exception as e:
-        modules["utils"] = f"Import failed: {e}"
-
+        modules["utils"] = f"Failed: {e}"
     return modules
 
-# ---------- 2. Device capability checks (9 functions) ----------
 def check_python_version():
     return sys.version_info >= (3, 9)
 
@@ -48,7 +43,7 @@ def check_cpu_cores():
 def check_ram_total():
     try:
         import psutil
-        return psutil.virtual_memory().total / (1024**3)  # GB
+        return psutil.virtual_memory().total / (1024**3)
     except:
         return 0
 
@@ -69,10 +64,9 @@ def check_disk_free(path="."):
 def check_gpu_info():
     try:
         import utils
-        info = utils.SystemMonitor.get_gpu_info()
-        return info
+        return utils.SystemMonitor.get_gpu_info()
     except:
-        return {"name": "N/A", "memory_used": 0, "memory_total": 0}
+        return {"name": "N/A"}
 
 def check_ffmpeg():
     return shutil.which("ffmpeg") is not None
@@ -85,33 +79,18 @@ def check_network_connectivity():
     except:
         return False
 
-def check_download_speed():
-    try:
-        import requests
-        # Download a small file to estimate speed
-        start = time.time()
-        r = requests.get("https://httpbin.org/bytes/102400", timeout=5)
-        duration = time.time() - start
-        speed = len(r.content) / duration / 1024  # KB/s
-        return speed
-    except:
-        return 0
-
-# ---------- 3. Test functions (6 tests) ----------
 def test_config_loading():
-    """Test that config.yaml can be loaded or created."""
     try:
         from main import load_config
         config = load_config("config.yaml")
         if config and "concurrency" in config:
-            return "PASS", config
+            return "PASS", "Config loaded"
         else:
             return "FAIL", "Config missing keys"
     except Exception as e:
         return "FAIL", str(e)
 
 def test_proxy_manager():
-    """Test proxy manager with mock proxies."""
     try:
         from core import ProxyManager
         pm = ProxyManager({"proxy": ["socks5://127.0.0.1:1080", "http://127.0.0.1:3128"]})
@@ -120,20 +99,18 @@ def test_proxy_manager():
         pm.rotate()
         p3 = pm.get_next_proxy()
         if p1 != p2 and p1 != p3 and p2 != p3:
-            return "PASS", "Rotation works"
+            return "PASS", "Proxy rotation works"
         else:
-            return "FAIL", "Proxy rotation not effective"
+            return "FAIL", "Rotation not effective"
     except Exception as e:
         return "FAIL", str(e)
 
 def test_ffmpeg_processor():
-    """Test FFmpegProcessor with a dummy file (if FFmpeg installed)."""
     if not check_ffmpeg():
-        return "SKIP", "FFmpeg not installed, skipping"
+        return "SKIP", "FFmpeg not installed"
     try:
         from utils import FFmpegProcessor
         proc = FFmpegProcessor()
-        # Create a dummy audio file (silence)
         temp_file = Path(tempfile.mktemp(suffix=".wav"))
         subprocess.run(["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "1", "-q:a", "9", "-acodec", "pcm_s16le", str(temp_file)], check=True, capture_output=True)
         out_file = temp_file.with_suffix(".mp3")
@@ -142,14 +119,13 @@ def test_ffmpeg_processor():
         temp_file.unlink(missing_ok=True)
         out_file.unlink(missing_ok=True)
         if result:
-            return "PASS", "Converted wav to mp3 successfully"
+            return "PASS", "Conversion works"
         else:
             return "FAIL", "Conversion failed"
     except Exception as e:
         return "FAIL", str(e)
 
 def test_queue_manager():
-    """Test QueueManager with multiple jobs."""
     try:
         from core import QueueManager
         qm = QueueManager()
@@ -167,7 +143,6 @@ def test_queue_manager():
         return "FAIL", str(e)
 
 def test_resource_monitor():
-    """Test SystemMonitor functions."""
     try:
         from utils import SystemMonitor
         cpu = SystemMonitor.get_cpu_percent()
@@ -175,14 +150,13 @@ def test_resource_monitor():
         disk = SystemMonitor.get_disk_usage(".")
         gpu = SystemMonitor.get_gpu_info()
         if isinstance(cpu, (int, float)) and "used" in mem and "total" in mem:
-            return "PASS", f"CPU: {cpu}%, RAM: {mem['used']:.1f}GB/{mem['total']:.1f}GB, GPU: {gpu.get('name','N/A')}"
+            return "PASS", f"CPU: {cpu}%, RAM: {mem['used']:.1f}GB/{mem['total']:.1f}GB"
         else:
             return "FAIL", "Monitor returned unexpected data"
     except Exception as e:
         return "FAIL", str(e)
 
 def test_download_manager_init():
-    """Test DownloadManager initialisation with config."""
     try:
         from core import DownloadManager
         from main import load_config
@@ -195,13 +169,12 @@ def test_download_manager_init():
     except Exception as e:
         return "FAIL", str(e)
 
-# ---------- 4. Main runner ----------
 def run_all_tests():
     print("=== YT‑FR Pro System Test ===")
     print("\n--- Module Imports ---")
     modules = import_modules()
     for name, status in modules.items():
-        if "failed" in str(status).lower():
+        if "Failed" in status:
             print(f"  ❌ {name}: {status}")
         else:
             print(f"  ✅ {name} imported")
@@ -216,11 +189,9 @@ def run_all_tests():
     disk_free = check_disk_free()
     print(f"  Disk free: {disk_free:.1f} GB")
     gpu = check_gpu_info()
-    print(f"  GPU: {gpu.get('name', 'N/A')} (Memory: {gpu.get('memory_used',0):.1f}/{gpu.get('memory_total',0):.1f} GB)")
+    print(f"  GPU: {gpu.get('name', 'N/A')} (Mem: {gpu.get('memory_used',0):.1f}/{gpu.get('memory_total',0):.1f} GB)")
     print(f"  FFmpeg installed: {'✅' if check_ffmpeg() else '❌'}")
     print(f"  Network reachable: {'✅' if check_network_connectivity() else '❌'}")
-    speed = check_download_speed()
-    print(f"  Download speed: {speed:.0f} KB/s")
 
     print("\n--- Running 6 Tests ---")
     test_results = []
@@ -242,7 +213,6 @@ def run_all_tests():
         test_results.append((name, status, msg))
         print(f"  {symbol} {name}: {msg}")
 
-    # Summary
     passed = sum(1 for _, s, _ in test_results if s == "PASS")
     skipped = sum(1 for _, s, _ in test_results if s == "SKIP")
     failed = sum(1 for _, s, _ in test_results if s == "FAIL")
@@ -251,10 +221,9 @@ def run_all_tests():
     print(f"⏭️ Skipped: {skipped}")
     print(f"❌ Failed: {failed}")
     if failed == 0:
-        print("\n🎉 All tests passed! Your device is ready for YT‑FR Pro.")
+        print("\n🎉 All tests passed! Your device is ready.")
     else:
-        print("\n⚠️ Some tests failed. Check error messages and ensure dependencies are correct.")
-        print("   Run 'python auto-setup.py' to fix common issues.")
+        print("\n⚠️ Some tests failed. Run 'python auto-setup.py' to fix.")
 
 if __name__ == "__main__":
     run_all_tests()
