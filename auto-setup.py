@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 auto-setup.py – Environment bootstrapper for YT‑FR Pro.
-Checks Python, installs packages, verifies FFmpeg, and creates config.
+Checks Python, installs all packages, verifies FFmpeg, creates config.
 """
 
 import sys
@@ -10,10 +10,12 @@ import subprocess
 import platform
 import shutil
 import json
+import tempfile
 from pathlib import Path
 import importlib.util
+import secrets
+import yaml
 
-# ---------- Configuration ----------
 REQUIRED_PYTHON_VERSION = (3, 9)
 REQUIRED_PACKAGES = [
     "yt-dlp",
@@ -22,32 +24,12 @@ REQUIRED_PACKAGES = [
     "Flask",
     "PyYAML",
     "cryptography",
-    "psutil",      # for resource monitoring
-    "pynvml",      # optional GPU monitoring
-    "schedule",    # scheduler
-    "win10toast",  # Windows notifications (optional)
+    "psutil",
+    "pynvml",
+    "schedule",
+    "win10toast",
 ]
-FFMPEG_URLS = {
-    "Windows": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
-    "Darwin": "https://evermeet.cx/ffmpeg/ffmpeg-6.0.zip",
-}
-CONFIG_TEMPLATE = {
-    "concurrency": 3,
-    "download_dir": "./downloads",
-    "proxy": None,  # or ["socks5://...", "http://..."]
-    "vpn": {"enabled": False, "command": "openvpn", "config": ""},
-    "retry": {"max_attempts": 5, "backoff_factor": 2},
-    "format": "mp4",
-    "metadata": True,
-    "subtitles": True,
-    "thumbnail": True,
-    "post_process": {"convert": False, "target_format": "mp4"},
-    "logging": {"level": "INFO", "file": "download.log"},
-    "api": {"enabled": False, "port": 5000},
-    "scheduler": {"enabled": False, "cron": "0 0 * * *"},
-}
 
-# ---------- Helper functions ----------
 def print_step(msg):
     print(f"\n[STEP] {msg}")
 
@@ -64,7 +46,6 @@ def check_python_version():
     print_ok(f"Python version {sys.version_info.major}.{sys.version_info.minor} OK")
 
 def install_packages():
-    """Install missing Python packages via pip."""
     missing = []
     for pkg in REQUIRED_PACKAGES:
         if importlib.util.find_spec(pkg) is None:
@@ -80,58 +61,91 @@ def install_packages():
         print_ok("All required packages already installed")
 
 def check_ffmpeg():
-    """Check if ffmpeg is available; if not, try to install or guide user."""
     if shutil.which("ffmpeg"):
         print_ok("FFmpeg found")
         return True
     print_step("FFmpeg not found. Attempting automatic install...")
     system = platform.system()
     if system == "Windows":
-        # Try winget
         try:
             subprocess.run(["winget", "install", "FFmpeg"], check=True, capture_output=True)
             print_ok("FFmpeg installed via winget")
             return True
         except:
-            print_err("Could not install FFmpeg via winget.")
-            # Provide manual download link
-            print(f"Please download FFmpeg from {FFMPEG_URLS['Windows']} and add it to PATH.")
-            return False
+            print_err("winget failed. Trying manual download...")
+            try:
+                import requests, zipfile, io
+                url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+                r = requests.get(url, timeout=30)
+                z = zipfile.ZipFile(io.BytesIO(r.content))
+                z.extractall(tempfile.gettempdir())
+                import glob
+                found = glob.glob(os.path.join(tempfile.gettempdir(), "ffmpeg-*", "bin", "ffmpeg.exe"))
+                if found:
+                    # Copy to System32 (might need admin)
+                    try:
+                        shutil.copy(found[0], "C:\\Windows\\System32\\ffmpeg.exe")
+                        print_ok("FFmpeg installed manually.")
+                        return True
+                    except PermissionError:
+                        print_err("Need admin rights to copy FFmpeg. Please run as Administrator or install manually.")
+                        return False
+            except Exception as e:
+                print_err(f"Manual install failed: {e}")
+                return False
     elif system == "Darwin":
         try:
             subprocess.run(["brew", "install", "ffmpeg"], check=True)
             print_ok("FFmpeg installed via Homebrew")
             return True
         except:
-            print_err("Could not install FFmpeg via Homebrew. Please install manually from https://ffmpeg.org/")
+            print_err("Could not install via Homebrew. Please install manually.")
             return False
-    else:  # Linux
+    else:
         try:
             subprocess.run(["sudo", "apt", "install", "-y", "ffmpeg"], check=True)
             print_ok("FFmpeg installed via apt")
             return True
         except:
-            print_err("Could not install FFmpeg via apt. Please install manually.")
-            return False
+            try:
+                subprocess.run(["sudo", "dnf", "install", "-y", "ffmpeg"], check=True)
+                print_ok("FFmpeg installed via dnf")
+                return True
+            except:
+                print_err("Could not install FFmpeg. Please install manually.")
+                return False
 
 def create_config():
-    """Create default config.yaml if missing."""
     config_path = Path("config.yaml")
     if config_path.exists():
         print_ok("config.yaml already exists, skipping.")
         return
     print_step("Creating default config.yaml...")
+    default_config = {
+        "concurrency": 3,
+        "download_dir": "./downloads",
+        "proxy": None,
+        "vpn": {"enabled": False, "command": "openvpn", "config": ""},
+        "retry": {"max_attempts": 5, "backoff_factor": 2},
+        "format": "mp4",
+        "metadata": True,
+        "subtitles": True,
+        "thumbnail": True,
+        "post_process": {"convert": False, "target_format": "mp4"},
+        "logging": {"level": "INFO", "file": "download.log"},
+        "api": {"enabled": False, "port": 5000, "api_key": secrets.token_urlsafe(16)},
+        "scheduler": {"enabled": False, "cron": "0 0 * * *"},
+        "subscriptions": [],
+    }
     with open(config_path, "w") as f:
-        import yaml
-        yaml.dump(CONFIG_TEMPLATE, f, default_flow_style=False)
-    print_ok("Created config.yaml – review and adjust as needed.")
+        yaml.dump(default_config, f, default_flow_style=False)
+    print_ok("Created config.yaml with generated API key.")
 
 def create_download_dir():
-    """Create the download directory if not present."""
-    dir_path = Path(CONFIG_TEMPLATE["download_dir"])
+    dir_path = Path("downloads")
     if not dir_path.exists():
-        dir_path.mkdir(parents=True)
-        print_ok(f"Created download directory: {dir_path}")
+        dir_path.mkdir()
+        print_ok("Created downloads directory.")
 
 def main():
     print("=== YT‑FR Pro Auto‑Setup ===")
@@ -142,13 +156,13 @@ def main():
     print_step("Checking FFmpeg...")
     ffmpeg_ok = check_ffmpeg()
     if not ffmpeg_ok:
-        print("WARNING: FFmpeg is not installed. Video conversions and metadata embedding may fail.")
+        print("WARNING: FFmpeg not installed. Conversions and thumbnails will fail.")
     print_step("Creating configuration...")
     create_config()
     create_download_dir()
     print("\n=== Setup complete ===")
-    print("You can now run the main script:")
-    print("  python main.py --url <your_url> --format mp4")
+    print("Run: python main.py --url <URL> --format mp4")
+    print("For API server: python main.py --api")
     if not ffmpeg_ok:
         print("Please install FFmpeg manually to enable all features.")
 
