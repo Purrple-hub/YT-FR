@@ -353,5 +353,3 @@ A solid, functional tool that works well for its intended purpose. The AI‑gene
 ---
 
 *Built with 💜 by [Purrple‑hub](https://github.com/Purrple-hub) – and a little help from DeepSeek & Gemini.*
-
-<BDS:memory_write key="project_yt_fr_analysis" importance="called">Analyzed YT-FR repo: AI-generated core (DeepSeek/Gemini) with human refinement in main.py, auto-setup.py, and half of test.py. Overall quality score 72/100.</BDS:memory_write>
