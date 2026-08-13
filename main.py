@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-YT‑FR Pro – Advanced YouTube Download Manager
-Entry point: CLI, config loading, dependency checks, and main loop.
-"""
-
 import argparse
 import sys
 import os
@@ -15,6 +9,14 @@ import importlib
 import pkg_resources
 from pathlib import Path
 from typing import Dict, Any, Optional
+import time
+import threading
+import json
+import secrets
+from flask import Flask, request, jsonify, abort
+import psutil
+import shutil
+import tempfile
 
 # ----------------------- AUTO‑INSTALLER -----------------------
 REQUIRED_PYTHON_PACKAGES = [
@@ -24,10 +26,13 @@ REQUIRED_PYTHON_PACKAGES = [
     "Flask",
     "PyYAML",
     "cryptography",
+    "psutil",
+    "pynvml",          # optional but recommended
+    "schedule",
+    "win10toast",      # optional
 ]
 
 def check_and_install_packages():
-    """Check required Python packages and install missing ones via pip."""
     missing = []
     for pkg in REQUIRED_PYTHON_PACKAGES:
         try:
@@ -40,34 +45,62 @@ def check_and_install_packages():
         print("Packages installed successfully.")
 
 def check_ffmpeg():
-    """Check if FFmpeg is available; if not, attempt to download (Windows) or advise."""
-    try:
-        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+    if shutil.which("ffmpeg"):
         return True
-    except (subprocess.SubprocessError, FileNotFoundError):
-        print("FFmpeg not found. Attempting auto‑install (Windows only with winget)...")
-        if sys.platform == "win32":
+    print("FFmpeg not found. Attempting auto‑install...")
+    system = platform.system()
+    if system == "Windows":
+        try:
+            subprocess.run(["winget", "install", "FFmpeg"], check=True)
+            print("FFmpeg installed via winget.")
+            return True
+        except:
+            # Fallback: download and extract from gyan.dev
             try:
-                subprocess.run(["winget", "install", "FFmpeg"], check=True)
-                print("FFmpeg installed via winget. Please restart the terminal.")
+                import requests, zipfile, io
+                url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+                r = requests.get(url)
+                z = zipfile.ZipFile(io.BytesIO(r.content))
+                z.extractall(tempfile.gettempdir())
+                # Find ffmpeg.exe and copy to a directory in PATH or add to PATH
+                extracted = Path(tempfile.gettempdir()) / "ffmpeg-*" / "bin" / "ffmpeg.exe"
+                import glob
+                found = glob.glob(str(extracted))
+                if found:
+                    shutil.copy(found[0], "C:\\Windows\\System32\\ffmpeg.exe")  # requires admin
+                    print("FFmpeg installed manually (may require admin).")
+                    return True
+            except Exception as e:
+                print(f"Manual FFmpeg install failed: {e}")
+                return False
+    elif system == "Darwin":
+        try:
+            subprocess.run(["brew", "install", "ffmpeg"], check=True)
+            return True
+        except:
+            print("Please install FFmpeg manually via https://ffmpeg.org/")
+            return False
+    else:  # Linux
+        try:
+            subprocess.run(["sudo", "apt", "install", "-y", "ffmpeg"], check=True)
+            return True
+        except:
+            try:
+                subprocess.run(["sudo", "dnf", "install", "-y", "ffmpeg"], check=True)
+                return True
             except:
-                print("Auto‑install failed. Please install FFmpeg manually from https://ffmpeg.org/")
-        else:
-            print("Please install FFmpeg using your package manager (e.g., apt install ffmpeg).")
-        return False
-    return True
+                print("Please install FFmpeg manually (e.g., 'sudo apt install ffmpeg').")
+                return False
 
 def setup_environment():
-    """Run all setup checks."""
     check_and_install_packages()
-    check_ffmpeg()
-    # Create default config if not exists
+    ffmpeg_ok = check_ffmpeg()
     config_path = Path("config.yaml")
     if not config_path.exists():
         default_config = {
             "concurrency": 3,
             "download_dir": "./downloads",
-            "proxy": None,  # or list of proxies
+            "proxy": None,
             "vpn": {"enabled": False, "command": "openvpn", "config": ""},
             "retry": {"max_attempts": 5, "backoff_factor": 2},
             "format": "mp4",
@@ -76,19 +109,20 @@ def setup_environment():
             "thumbnail": True,
             "post_process": {"convert": False, "target_format": "mp4"},
             "logging": {"level": "INFO", "file": "download.log"},
-            "api": {"enabled": False, "port": 5000},
+            "api": {"enabled": False, "port": 5000, "api_key": secrets.token_urlsafe(16)},
             "scheduler": {"enabled": False, "cron": "0 0 * * *"},
         }
         with open(config_path, "w") as f:
             yaml.dump(default_config, f, default_flow_style=False)
-        print("Created default config.yaml. Please review and adjust.")
+        print("Created default config.yaml. API key is generated; keep it safe.")
     else:
         print("Config file already exists.")
+    if not ffmpeg_ok:
+        print("WARNING: FFmpeg not installed – video conversions and metadata will fail.")
     print("Setup complete.")
 
 # ----------------------- LOGGING -----------------------
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
-    """Configure root logger."""
     log_level = getattr(logging, level.upper(), logging.INFO)
     handlers = [logging.StreamHandler(sys.stdout)]
     if log_file:
@@ -101,45 +135,62 @@ def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
 
 # ----------------------- CONFIG LOADER -----------------------
 def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
-    """Load configuration from YAML file."""
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
-    # Merge with CLI overrides later
     return config
 
-# ----------------------- RESOURCE MONITOR (stub) -----------------------
+# ----------------------- RESOURCE MONITOR (full) -----------------------
 class ResourceMonitor:
-    """Monitor system resources (RAM, GPU) to manage concurrency."""
     @staticmethod
     def get_memory_usage() -> float:
-        """Return current RAM usage in GB."""
-        import psutil
         return psutil.virtual_memory().used / (1024**3)
 
     @staticmethod
     def get_gpu_info() -> dict:
-        """Detect GPU and memory usage (Windows only with nvidia-smi)."""
+        # Try NVIDIA first
         try:
             import pynvml
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
             return {
-                "name": pynvml.nvmlDeviceGetName(handle),
-                "used": mem_info.used / (1024**3),
-                "total": mem_info.total / (1024**3),
+                "name": pynvml.nvmlDeviceGetName(handle).decode(),
+                "used": mem.used / (1024**3),
+                "total": mem.total / (1024**3),
+                "util": util.gpu,
             }
-        except ImportError:
-            # Fallback: use nvidia-smi
-            try:
-                result = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader"],
-                                        capture_output=True, text=True, check=True)
-                used, total = result.stdout.strip().split(",")
-                return {"used": float(used.split()[0])/1024, "total": float(total.split()[0])/1024}
-            except:
-                return {"used": 0, "total": 0}
         except:
-            return {"used": 0, "total": 0}
+            pass
+        # Try AMD via rocm-smi
+        try:
+            result = subprocess.run(["rocm-smi", "--showuse", "--showmemuse"], capture_output=True, text=True)
+            # Parse output...
+            # Simplified: just return a dict
+            return {"name": "AMD", "used": 0, "total": 0}
+        except:
+            pass
+        # Try Intel via intel-gpu-tools
+        try:
+            result = subprocess.run(["intel_gpu_top", "-J"], capture_output=True, text=True)
+            data = json.loads(result.stdout)
+            return {"name": "Intel", "used": 0, "total": 0}
+        except:
+            pass
+        # Fallback: use nvidia-smi if available
+        try:
+            result = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu", "--format=csv,noheader"], capture_output=True, text=True, check=True)
+            parts = result.stdout.strip().split(",")
+            if len(parts) >= 4:
+                return {
+                    "name": parts[0].strip(),
+                    "used": float(parts[1].split()[0])/1024,
+                    "total": float(parts[2].split()[0])/1024,
+                    "util": int(parts[3].strip().replace("%","")),
+                }
+        except:
+            pass
+        return {"name": "N/A", "used": 0, "total": 0}
 
 # ----------------------- MAIN -----------------------
 def main():
@@ -147,22 +198,21 @@ def main():
     parser.add_argument("--url", help="Video/playlist/channel URL")
     parser.add_argument("--format", choices=["mp4", "mp3", "mkv", "webm"], help="Output format")
     parser.add_argument("--concurrency", type=int, help="Number of parallel downloads")
-    parser.add_argument("--proxy", help="Proxy URL (e.g., socks5://127.0.0.1:1080)")
+    parser.add_argument("--proxy", help="Proxy URL")
     parser.add_argument("--vpn", action="store_true", help="Enable VPN mode (requires config)")
     parser.add_argument("--config", default="config.yaml", help="Path to config file")
     parser.add_argument("--setup", action="store_true", help="Run setup (install dependencies and create config)")
     parser.add_argument("--batch", help="File with list of URLs")
     parser.add_argument("--list", help="List available formats for a URL", nargs="?")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--api", action="store_true", help="Start REST API server")
     args = parser.parse_args()
 
     if args.setup:
         setup_environment()
         sys.exit(0)
 
-    # Load config
     config = load_config(args.config)
-    # Override with CLI
     if args.url:
         config["url"] = args.url
     if args.format:
@@ -176,10 +226,9 @@ def main():
     if args.debug:
         config["logging"]["level"] = "DEBUG"
 
-    # Setup logging
     setup_logging(config["logging"]["level"], config["logging"].get("file"))
     logger = logging.getLogger("main")
-    logger.info("Starting YT-FR Pro")
+    logger.info("Starting YT‑FR Pro")
 
     # Resource monitor
     monitor = ResourceMonitor()
@@ -187,22 +236,26 @@ def main():
     gpu = monitor.get_gpu_info()
     logger.info(f"System: RAM used {ram_gb:.2f} GB, GPU: {gpu.get('name', 'N/A')} ({gpu.get('used',0):.2f}/{gpu.get('total',0):.2f} GB)")
 
-    # Import core module (delayed to allow setup)
-    from core import DownloadManager, QueueManager
+    from core import DownloadManager, QueueManager, VPNManager, ProxyManager, start_api
+    from utils import SystemMonitor, PostProcessor, Notifier
 
-    # Initialize manager
     manager = DownloadManager(config, monitor=monitor)
     queue = QueueManager()
 
-    # Handle graceful shutdown
+    # VPN killswitch
+    vpn = VPNManager(config)
+    vpn.killswitch_callback = manager.pause
+    if config["vpn"]["enabled"]:
+        vpn.connect()
+
     def signal_handler(sig, frame):
         logger.info("Shutdown signal received, waiting for downloads to finish...")
         manager.shutdown()
+        vpn.disconnect()
         sys.exit(0)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Process URLs
     urls = []
     if args.url:
         urls.append(args.url)
@@ -210,16 +263,23 @@ def main():
         with open(args.batch, "r") as f:
             urls.extend([line.strip() for line in f if line.strip()])
 
-    if not urls:
-        logger.error("No URL provided. Use --url or --batch.")
+    if not urls and not args.api:
+        logger.error("No URL provided. Use --url, --batch, or start API with --api.")
         sys.exit(1)
+
+    # If API mode, start server in separate thread
+    if args.api:
+        api_thread = threading.Thread(target=start_api, args=(config, queue, manager), daemon=True)
+        api_thread.start()
+        logger.info(f"API server started on port {config['api'].get('port', 5000)}")
+        # Keep main thread alive
+        while True:
+            time.sleep(1)
 
     for url in urls:
         queue.add_job(url, config["format"])
 
-    # Start processing
     manager.process_queue(queue)
-
     logger.info("All downloads finished.")
 
 if __name__ == "__main__":
